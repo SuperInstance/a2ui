@@ -1,392 +1,409 @@
-"""
-Comprehensive tests for A2UI — Adaptive Interface.
-"""
+"""Tests for A2UI — Adaptive Interface."""
 
+import json
 import pytest
 
 from a2ui import (
     AdaptiveInterface,
-    InterfaceSpec,
     Schema,
+    Entity,
+    Field,
     FieldType,
+    ViewType,
     Intent,
-    IntentParser,
+    parse_intent,
+    InterfaceSpec,
+    InterfaceComponent,
     HTMLRenderer,
     MarkdownRenderer,
     JSONRenderer,
 )
+from a2ui.intent import Filter, Sort
 
 
-# ─── Test Schema ───
-
+# --- Fixtures ---
 
 @pytest.fixture
 def vessel_schema():
-    return {
-        "vessels": {
-            "fields": {
-                "name": {"type": "string", "label": "Vessel Name"},
-                "length": {"type": "number", "unit": "ft"},
-                "engine_hours": {"type": "number", "label": "Engine Hours"},
-                "status": {
-                    "type": "enum",
-                    "options": ["active", "docked", "maintenance"],
-                },
-                "home_port": {"type": "string"},
-            },
-            "primary_key": "name",
-        }
-    }
+    return Schema(
+        entities=[
+            Entity(
+                name="vessel",
+                label="Vessel",
+                fields=[
+                    Field(name="name", type="text", label="Vessel Name", required=True),
+                    Field(name="length", type="number", label="Length", unit="ft"),
+                    Field(name="home_port", type="text", label="Home Port"),
+                    Field(name="status", type="enum", label="Status",
+                          options=["active", "docked", "maintenance"]),
+                    Field(name="acquired", type="date", label="Acquired Date"),
+                ],
+            ),
+            Entity(
+                name="catch",
+                label="Catch Log",
+                fields=[
+                    Field(name="species", type="text", label="Species"),
+                    Field(name="weight", type="number", label="Weight", unit="kg"),
+                    Field(name="vessel_id", type="reference", label="Vessel", reference="vessel"),
+                ],
+            ),
+        ],
+    )
 
 
 @pytest.fixture
-def vessel_data():
-    return {
-        "vessels": [
-            {"name": "Ocean Rover", "length": 45, "engine_hours": 6000, "status": "active", "home_port": "Newport"},
-            {"name": "Sea Sprite", "length": 32, "engine_hours": 3200, "status": "docked", "home_port": "Boston"},
-            {"name": "Wave Dancer", "length": 55, "engine_hours": 8000, "status": "maintenance", "home_port": "Gloucester"},
-            {"name": "Morning Star", "length": 28, "engine_hours": 1500, "status": "active", "home_port": "Portland"},
-            {"name": "Storm Runner", "length": 60, "engine_hours": 7500, "status": "active", "home_port": "Newport"},
-        ]
-    }
+def ai(vessel_schema):
+    return AdaptiveInterface(vessel_schema)
 
 
-@pytest.fixture
-def ai(vessel_schema, vessel_data):
-    return AdaptiveInterface(vessel_schema, vessel_data)
-
+# --- Schema Tests ---
 
 class TestSchema:
-    def test_loads_entities(self, vessel_schema):
-        s = Schema(vessel_schema)
-        assert "vessels" in s.entities
+    def test_field_type_enum(self):
+        f = Field(name="status", type="enum", options=["a", "b"])
+        assert f.type == FieldType.ENUM
+        assert f.options == ["a", "b"]
 
-    def test_get_entity(self, vessel_schema):
-        s = Schema(vessel_schema)
-        entity = s.get_entity("vessels")
-        assert "fields" in entity
-        assert entity["primary_key"] == "name"
+    def test_field_default_label(self):
+        f = Field(name="home_port", type="text")
+        assert f.label == "Home Port"
 
-    def test_get_entity_case_insensitive(self, vessel_schema):
-        s = Schema(vessel_schema)
-        assert s.has_entity("Vessels")
-        assert s.has_entity("VESSELS")
-        assert not s.has_entity("ships")
+    def test_entity_get_field(self):
+        e = Entity(name="vessel", fields=[Field(name="length", type="number")])
+        assert e.get_field("length") is not None
+        assert e.get_field("nonexistent") is None
 
-    def test_get_fields(self, vessel_schema):
-        s = Schema(vessel_schema)
-        fields = s.get_fields("vessels")
-        assert "name" in fields
-        assert fields["name"].type == FieldType.STRING
-        assert fields["length"].type == FieldType.NUMBER
-        assert fields["length"].unit == "ft"
+    def test_entity_default_primary_key(self):
+        e = Entity(name="vessel", fields=[Field(name="id", type="text"), Field(name="name", type="text")])
+        assert e.primary_key == "id"
 
-    def test_field_label_generation(self, vessel_schema):
-        s = Schema(vessel_schema)
-        fields = s.get_fields("vessels")
-        assert fields["engine_hours"].label == "Engine Hours"
-        assert fields["length"].display_label == "Length (ft)"
+    def test_schema_get_entity(self, vessel_schema):
+        assert vessel_schema.get_entity("vessel") is not None
+        assert vessel_schema.get_entity("Vessel") is not None
+        assert vessel_schema.get_entity("Vessels") is not None
+        assert vessel_schema.get_entity("nonexistent") is None
 
-    def test_resolve_field_name(self, vessel_schema):
-        s = Schema(vessel_schema)
-        assert s.resolve_field_name("vessels", "engine_hours") == "engine_hours"
+    def test_schema_entity_names(self, vessel_schema):
+        assert "vessel" in vessel_schema.entity_names()
+        assert "catch" in vessel_schema.entity_names()
 
-    def test_enum_field(self, vessel_schema):
-        s = Schema(vessel_schema)
-        fields = s.get_fields("vessels")
-        assert fields["status"].type == FieldType.ENUM
-        assert "active" in fields["status"].options
+    def test_field_to_dict(self):
+        f = Field(name="weight", type="number", label="Weight", unit="kg", required=True)
+        d = f.to_dict()
+        assert d["name"] == "weight"
+        assert d["type"] == "number"
+        assert d["unit"] == "kg"
+        assert d["required"] is True
+
+    def test_entity_to_dict(self):
+        e = Entity(name="vessel", fields=[Field(name="name", type="text")])
+        d = e.to_dict()
+        assert d["name"] == "vessel"
+        assert len(d["fields"]) == 1
+
+    def test_schema_to_dict(self, vessel_schema):
+        d = vessel_schema.to_dict()
+        assert "entities" in d
+        assert len(d["entities"]) == 2
 
 
-class TestFieldType:
-    def test_from_string_basic(self):
-        assert FieldType.from_string("string") == FieldType.STRING
-        assert FieldType.from_string("number") == FieldType.NUMBER
-
-    def test_from_string_aliases(self):
-        assert FieldType.from_string("int") == FieldType.NUMBER
-        assert FieldType.from_string("bool") == FieldType.BOOLEAN
-        assert FieldType.from_string("text") == FieldType.STRING
-
-    def test_from_string_unknown(self):
-        assert FieldType.from_string("unknown") == FieldType.STRING
-
+# --- Intent Parsing Tests ---
 
 class TestIntentParsing:
-    def test_basic_action(self, vessel_schema):
-        parser = IntentParser(Schema(vessel_schema))
-        intent = parser.parse("show all vessels")
-        assert intent.action == "show"
-        assert intent.entity == "vessels"
-
-    def test_list_action(self, vessel_schema):
-        parser = IntentParser(Schema(vessel_schema))
-        intent = parser.parse("list vessels")
+    def test_list_intent(self, vessel_schema):
+        intent = parse_intent("show all vessels", vessel_schema)
         assert intent.action == "list"
+        assert intent.entity == "vessel"
 
-    def test_find_action(self, vessel_schema):
-        parser = IntentParser(Schema(vessel_schema))
-        intent = parser.parse("find vessels")
-        assert intent.action == "find"
+    def test_create_intent(self, vessel_schema):
+        intent = parse_intent("new vessel", vessel_schema)
+        assert intent.action == "create"
+        assert intent.entity == "vessel"
 
-    def test_entity_resolution(self, vessel_schema):
-        parser = IntentParser(Schema(vessel_schema))
-        intent = parser.parse("show me all vessels")
-        assert intent.entity == "vessels"
+    def test_edit_intent(self, vessel_schema):
+        intent = parse_intent("edit vessel", vessel_schema)
+        assert intent.action == "edit"
 
-    def test_filter_gt(self, vessel_schema):
-        parser = IntentParser(Schema(vessel_schema))
-        intent = parser.parse("show vessels with engine hours over 5000")
-        assert len(intent.filters) == 1
-        assert intent.filters[0]["field"] == "engine_hours"
-        assert intent.filters[0]["op"] == "gt"
-        assert intent.filters[0]["value"] == 5000
+    def test_detail_intent(self, vessel_schema):
+        intent = parse_intent("view vessel", vessel_schema)
+        assert intent.action == "detail"
 
-    def test_filter_lt(self, vessel_schema):
-        parser = IntentParser(Schema(vessel_schema))
-        intent = parser.parse("show vessels with length under 40")
-        assert len(intent.filters) == 1
-        assert intent.filters[0]["op"] == "lt"
-        assert intent.filters[0]["value"] == 40
+    def test_chart_intent(self, vessel_schema):
+        intent = parse_intent("chart vessels", vessel_schema)
+        assert intent.action == "chart"
+        assert intent.view_hint == ViewType.CHART
 
-    def test_filter_gte(self, vessel_schema):
-        parser = IntentParser(Schema(vessel_schema))
-        intent = parser.parse("show vessels with engine hours at least 5000")
-        assert len(intent.filters) == 1
-        assert intent.filters[0]["op"] == "gte"
+    def test_entity_resolution_plural(self, vessel_schema):
+        intent = parse_intent("show vessels", vessel_schema)
+        assert intent.entity == "vessel"
 
-    def test_filter_lte(self, vessel_schema):
-        parser = IntentParser(Schema(vessel_schema))
-        intent = parser.parse("vessels with length at most 50")
-        assert any(f["op"] == "lte" for f in intent.filters)
+    def test_entity_resolution_label(self, vessel_schema):
+        intent = parse_intent("show catch logs", vessel_schema)
+        assert intent.entity == "catch"
 
-    def test_filter_enum(self, vessel_schema):
-        parser = IntentParser(Schema(vessel_schema))
-        intent = parser.parse("show active vessels")
-        # Should pick up "active" as enum filter
-        assert any(
-            f["field"] == "status" and f["value"] == "active"
-            for f in intent.filters
-        )
+    def test_comparison_filter(self, vessel_schema):
+        intent = parse_intent("show vessels over 50", vessel_schema)
+        assert len(intent.filters) >= 1
+        assert intent.filters[0].operator == "gt"
+        assert intent.filters[0].value == 50.0
 
-    def test_sort_ascending(self, vessel_schema):
-        parser = IntentParser(Schema(vessel_schema))
-        intent = parser.parse("list vessels sorted by length ascending")
-        assert intent.sort_by is not None
-        assert intent.sort_by[0] == "length"
-        assert intent.sort_by[1] == "asc"
+    def test_comparison_filter_under(self, vessel_schema):
+        intent = parse_intent("show vessels under 100", vessel_schema)
+        assert len(intent.filters) >= 1
+        assert any(f.operator == "lt" for f in intent.filters)
 
-    def test_sort_descending(self, vessel_schema):
-        parser = IntentParser(Schema(vessel_schema))
-        intent = parser.parse("show vessels sorted by engine hours descending")
-        assert intent.sort_by is not None
-        assert intent.sort_by[0] == "engine_hours"
-        assert intent.sort_by[1] == "desc"
+    def test_equality_filter(self, vessel_schema):
+        intent = parse_intent("show vessels where status is active", vessel_schema)
+        eq_filters = [f for f in intent.filters if f.operator == "eq"]
+        assert len(eq_filters) >= 1
+        assert eq_filters[0].field == "status"
+        assert eq_filters[0].value == "active"
 
-    def test_sort_short_form(self, vessel_schema):
-        parser = IntentParser(Schema(vessel_schema))
-        intent = parser.parse("vessels ordered by length desc")
-        assert intent.sort_by is not None
-        assert intent.sort_by[1] == "desc"
+    def test_sort_parsing(self, vessel_schema):
+        intent = parse_intent("show vessels sorted by length descending", vessel_schema)
+        assert intent.sort is not None
+        assert intent.sort.field == "length"
+        assert intent.sort.direction == "desc"
 
-    def test_multiple_filters(self, vessel_schema):
-        parser = IntentParser(Schema(vessel_schema))
-        intent = parser.parse("show active vessels with engine hours over 3000")
-        assert len(intent.filters) >= 2
+    def test_sort_asc(self, vessel_schema):
+        intent = parse_intent("show vessels sorted by name asc", vessel_schema)
+        assert intent.sort is not None
+        assert intent.sort.direction == "asc"
 
-    def test_default_action_is_show(self, vessel_schema):
-        parser = IntentParser(Schema(vessel_schema))
-        intent = parser.parse("vessels")
-        assert intent.action == "show"
+    def test_order_by(self, vessel_schema):
+        intent = parse_intent("show vessels order by length", vessel_schema)
+        assert intent.sort is not None
+        assert intent.sort.field == "length"
 
-    def test_raw_text_preserved(self, vessel_schema):
-        parser = IntentParser(Schema(vessel_schema))
-        raw = "show me the vessels"
-        intent = parser.parse(raw)
+    def test_intent_to_dict(self, vessel_schema):
+        intent = parse_intent("show vessels over 50 sorted by length", vessel_schema)
+        d = intent.to_dict()
+        assert d["action"] == "list"
+        assert d["entity"] == "vessel"
+        assert "filters" in d
+
+    def test_raw_preserved(self, vessel_schema):
+        raw = "show all active vessels sorted by length"
+        intent = parse_intent(raw, vessel_schema)
         assert intent.raw == raw
 
+    def test_empty_entity_fallback(self, vessel_schema):
+        intent = parse_intent("show everything", vessel_schema)
+        # Falls back to first entity
+        assert intent.entity == vessel_schema.entities[0].name
+
+
+# --- AdaptiveInterface Tests ---
 
 class TestAdaptiveInterface:
-    def test_ask_returns_spec(self, ai):
-        spec = ai.ask("show all vessels")
-        assert isinstance(spec, InterfaceSpec)
+    def test_render_list(self, ai):
+        spec = ai.render("show all vessels")
+        assert spec.view_type == ViewType.LIST
+        assert spec.entity == "vessel"
+        assert len(spec.components) > 0
 
-    def test_view_type_table(self, ai):
-        spec = ai.ask("show all vessels")
-        assert spec.view_type == "table"
+    def test_render_list_has_columns(self, ai):
+        spec = ai.render("show vessels")
+        columns = [c for c in spec.components if c.component_type == "column"]
+        assert len(columns) == 5  # 5 fields on vessel entity
 
-    def test_filter_applied(self, ai):
-        spec = ai.ask("show vessels with engine hours over 5000")
-        assert len(spec.data) == 3  # Ocean Rover, Wave Dancer, Storm Runner
-        names = [r["name"] for r in spec.data]
-        assert "Ocean Rover" in names
-        assert "Sea Sprite" not in names
+    def test_render_form(self, ai):
+        spec = ai.render("new vessel")
+        assert spec.view_type == ViewType.FORM
+        inputs = [c for c in spec.components if c.component_type == "input"]
+        assert len(inputs) == 5
 
-    def test_sort_applied(self, ai):
-        spec = ai.ask("list vessels sorted by length descending")
-        lengths = [r["length"] for r in spec.data]
-        assert lengths == sorted(lengths, reverse=True)
+    def test_render_form_has_submit(self, ai):
+        spec = ai.render("new vessel")
+        buttons = [c for c in spec.components if c.component_type == "button"]
+        assert len(buttons) >= 1
+        assert any("Submit" in b.label for b in buttons)
 
-    def test_sort_ascending(self, ai):
-        spec = ai.ask("show vessels sorted by engine hours ascending")
-        hours = [r["engine_hours"] for r in spec.data]
-        assert hours == sorted(hours)
+    def test_render_detail(self, ai):
+        spec = ai.render("view vessel")
+        assert spec.view_type == ViewType.DETAIL
 
-    def test_combined_filter_and_sort(self, ai):
-        spec = ai.ask("show active vessels with engine hours over 3000 sorted by length desc")
-        assert len(spec.data) == 2  # Ocean Rover (6000, 45ft) and Storm Runner (7500, 60ft)
-        lengths = [r["length"] for r in spec.data]
-        assert lengths == sorted(lengths, reverse=True)
+    def test_render_chart(self, ai):
+        spec = ai.render("chart vessels")
+        assert spec.view_type == ViewType.CHART
 
-    def test_default_columns(self, ai):
-        spec = ai.ask("show all vessels")
-        assert "name" in spec.columns  # primary key first
+    def test_render_preserves_filters(self, ai):
+        spec = ai.render("show vessels over 50")
+        assert len(spec.filters) >= 1
 
-    def test_title_generated(self, ai):
-        spec = ai.ask("show vessels with engine hours over 5000")
-        assert "Showing vessels" in spec.title
-        assert "engine_hours" in spec.title or "Engine Hours" in spec.title
+    def test_render_preserves_sort(self, ai):
+        spec = ai.render("show vessels sorted by length desc")
+        assert spec.sort is not None
+        assert spec.sort.direction == "desc"
 
-    def test_empty_result(self, ai):
-        spec = ai.ask("show vessels with engine hours over 99999")
-        assert len(spec.data) == 0
+    def test_render_unknown_entity(self, ai):
+        spec = ai.render("show xyz")
+        # Falls back to nav list
+        assert len(spec.components) > 0
 
-    def test_render_html(self, ai):
-        output = ai.render("show all vessels", format="html")
-        assert "<table" in output
-        assert "Ocean Rover" in output
+    def test_render_intent_object(self, ai, vessel_schema):
+        intent = parse_intent("new catch", vessel_schema)
+        spec = ai.render_intent(intent)
+        assert spec.view_type == ViewType.FORM
+        assert spec.entity == "catch"
 
-    def test_render_markdown(self, ai):
-        output = ai.render("show all vessels", format="markdown")
-        assert "|" in output
-        assert "Ocean Rover" in output
+    def test_to_html(self, ai):
+        html = ai.to_html("show vessels")
+        assert "<html" in html.lower()
+        assert "lcars" in html.lower()
 
-    def test_render_json(self, ai):
-        output = ai.render("show all vessels", format="json")
-        import json
-        parsed = json.loads(output)
-        assert "data" in parsed
-        assert len(parsed["data"]) == 5
-        assert parsed["view_type"] == "table"
+    def test_to_markdown(self, ai):
+        md = ai.to_markdown("show vessels")
+        assert "# " in md
+        assert "Vessel" in md or "vessel" in md
 
+    def test_to_json(self, ai):
+        j = ai.to_json("show vessels")
+        data = json.loads(j)
+        assert "title" in data
+        assert "components" in data
+
+    def test_form_enum_has_options(self, ai):
+        spec = ai.render("new vessel")
+        for c in spec.components:
+            if c.component_type == "input" and c.field == "status":
+                assert c.options == ["active", "docked", "maintenance"]
+                assert c.input_type == "select"
+
+    def test_form_reference_input(self, vessel_schema):
+        ai = AdaptiveInterface(vessel_schema)
+        spec = ai.render("new catch")
+        for c in spec.components:
+            if c.component_type == "input" and c.field == "vessel_id":
+                assert c.input_type == "reference"
+                assert c.reference == "vessel"
+
+
+# --- Renderer Tests ---
 
 class TestRenderers:
-    def test_html_table(self, ai):
-        spec = ai.ask("show all vessels")
-        html_out = HTMLRenderer().render(spec)
-        assert "<table" in html_out
-        assert "</table>" in html_out
+    def test_html_renderer(self, ai):
+        spec = ai.render("show vessels")
+        html = HTMLRenderer().render(spec)
+        assert "<!DOCTYPE html>" in html
+        assert "<table" in html
+        assert spec.title in html
 
-    def test_html_empty(self, ai):
-        spec = ai.ask("show vessels with engine hours over 99999")
-        html_out = HTMLRenderer().render(spec)
-        assert "No matching records" in html_out
+    def test_html_escapes(self):
+        spec = InterfaceSpec(
+            title="<script>alert(1)</script>",
+            view_type=ViewType.LIST,
+            components=[],
+        )
+        html = HTMLRenderer().render(spec)
+        assert "<script>" not in html
+        assert "&lt;script&gt;" in html
 
-    def test_html_count(self, ai):
-        spec = ai.ask("show all vessels")
-        html_out = HTMLRenderer().render(spec)
-        assert "5 record(s)" in html_out
+    def test_html_form(self, ai):
+        spec = ai.render("new vessel")
+        html = HTMLRenderer().render(spec)
+        assert "<input" in html
+        assert "<select" in html  # for enum field
 
-    def test_html_sort_indicator(self, ai):
-        spec = ai.ask("show vessels sorted by length desc")
-        html_out = HTMLRenderer().render(spec)
-        assert "↓" in html_out
+    def test_html_detail(self, ai):
+        spec = ai.render("view vessel")
+        html = HTMLRenderer().render(spec)
+        assert "lcars-detail" in html
 
-    def test_markdown_table(self, ai):
-        spec = ai.ask("show all vessels")
+    def test_markdown_list(self, ai):
+        spec = ai.render("show vessels")
         md = MarkdownRenderer().render(spec)
-        assert md.startswith("## ")
-        assert "|" in md
+        assert "| " in md  # has a table
         assert "---" in md
 
-    def test_markdown_empty(self, ai):
-        spec = ai.ask("show vessels with engine hours over 99999")
+    def test_markdown_form(self, ai):
+        spec = ai.render("new vessel")
         md = MarkdownRenderer().render(spec)
-        assert "No matching records" in md
+        assert "Field" in md
+        assert "Type" in md
 
-    def test_json_structure(self, ai):
-        spec = ai.ask("show all vessels")
+    def test_markdown_detail(self, ai):
+        spec = ai.render("view vessel")
+        md = MarkdownRenderer().render(spec)
+        assert "**" in md  # bold labels
+
+    def test_json_renderer(self, ai):
+        spec = ai.render("show vessels")
         j = JSONRenderer().render(spec)
-        import json
         data = json.loads(j)
-        assert data["view_type"] == "table"
-        assert "columns" in data
-        assert "data" in data
-        assert "count" in data
+        assert data["view_type"] == "list"
+        assert "components" in data
 
-    def test_json_count(self, ai):
-        spec = ai.ask("show all vessels")
-        j = JSONRenderer().render(spec)
-        import json
+    def test_json_renderer_indent(self, ai):
+        spec = ai.render("show vessels")
+        j = JSONRenderer().render(spec, indent=4)
+        assert "    " in j  # 4-space indent
+
+
+# --- InterfaceSpec Tests ---
+
+class TestInterfaceSpec:
+    def test_to_dict(self):
+        spec = InterfaceSpec(
+            title="Test",
+            view_type=ViewType.LIST,
+            entity="test",
+            components=[InterfaceComponent(component_type="column", label="Name", field="name")],
+        )
+        d = spec.to_dict()
+        assert d["title"] == "Test"
+        assert d["view_type"] == "list"
+        assert len(d["components"]) == 1
+
+    def test_to_json(self):
+        spec = InterfaceSpec(title="Test", view_type=ViewType.FORM)
+        j = spec.to_json()
         data = json.loads(j)
-        assert data["count"] == 5
+        assert data["title"] == "Test"
 
-    def test_spec_render_html(self, ai):
-        spec = ai.ask("show all vessels")
-        out = spec.render("html")
-        assert "<table" in out
+    def test_to_html(self):
+        spec = InterfaceSpec(title="Test", view_type=ViewType.LIST)
+        html = spec.to_html()
+        assert "<!DOCTYPE html>" in html
 
-    def test_spec_render_markdown(self, ai):
-        spec = ai.ask("show all vessels")
-        out = spec.render("markdown")
-        assert "|" in out
-
-    def test_spec_render_json(self, ai):
-        spec = ai.ask("show all vessels")
-        out = spec.render("json")
-        import json
-        json.loads(out)  # should not raise
-
-    def test_spec_render_bad_format(self, ai):
-        spec = ai.ask("show all vessels")
-        with pytest.raises(ValueError, match="Unknown format"):
-            spec.render("xml")
+    def test_to_markdown(self):
+        spec = InterfaceSpec(title="Test", view_type=ViewType.LIST)
+        md = spec.to_markdown()
+        assert "# Test" in md
 
 
-class TestSummaryView:
-    def test_summary_view(self, ai):
-        spec = ai.ask("summary of all vessels")
-        assert spec.view_type == "summary"
-        html = spec.render("html")
-        assert "Total records" in html
+# --- Integration Tests ---
 
-    def test_summary_markdown(self, ai):
-        spec = ai.ask("overview of vessels")
-        md = spec.render("markdown")
-        assert "Total records" in md
-
-
-class TestEdgeCases:
-    def test_unknown_entity(self, vessel_schema):
+class TestIntegration:
+    def test_full_flow_list(self, vessel_schema):
         ai = AdaptiveInterface(vessel_schema)
-        spec = ai.ask("show me the widgets")
-        # Falls back to first entity
-        assert spec.intent.entity in ("vessels", "")
+        spec = ai.render("show active vessels over 30 sorted by length desc")
+        assert spec.view_type == ViewType.LIST
+        assert len(spec.filters) >= 1
+        assert spec.sort is not None
 
-    def test_no_filters(self, ai):
-        spec = ai.ask("show vessels")
-        assert len(spec.filters) == 0
-        assert len(spec.data) == 5
+    def test_full_flow_html_output(self, vessel_schema):
+        ai = AdaptiveInterface(vessel_schema)
+        html = ai.to_html("show vessels")
+        assert "<!DOCTYPE html>" in html
+        assert "lcars" in html.lower()
 
-    def test_exact_value_filter(self, ai):
-        spec = ai.ask("show vessels from Newport")
-        # "from" might be interpreted differently, but Newport should match
-        # as a contains filter or direct match
-        assert len(spec.data) >= 1
+    def test_full_flow_json_valid(self, vessel_schema):
+        ai = AdaptiveInterface(vessel_schema)
+        j = ai.to_json("new vessel")
+        data = json.loads(j)
+        assert data["view_type"] == "form"
 
-    def test_multiple_sorts_same_field(self, ai):
-        spec_asc = ai.ask("vessels sorted by length ascending")
-        spec_desc = ai.ask("vessels sorted by length descending")
-        assert spec_asc.sort_by[1] == "asc"
-        assert spec_desc.sort_by[1] == "desc"
+    def test_catch_entity_form(self, vessel_schema):
+        ai = AdaptiveInterface(vessel_schema)
+        spec = ai.render("new catch")
+        assert spec.entity == "catch"
+        assert spec.view_type == ViewType.FORM
 
-    def test_interface_spec_repr(self, ai):
-        spec = ai.ask("show all vessels")
-        r = repr(spec)
-        assert "InterfaceSpec" in r
-        assert "table" in r
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    def test_multi_entity_schema(self, vessel_schema):
+        ai = AdaptiveInterface(vessel_schema)
+        v_spec = ai.render("show vessels")
+        c_spec = ai.render("show catch logs")
+        assert v_spec.entity == "vessel"
+        assert c_spec.entity == "catch"
