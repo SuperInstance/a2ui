@@ -1,348 +1,282 @@
-"""
-Intent parsing — turn natural language into structured Intent.
+"""Intent parsing for A2UI.
 
-The Whistle Layer doesn't need full NLP. It needs enough to understand
-what the user wants, and the schema provides the vocabulary.
+Converts natural-language strings into structured :class:`Intent` objects.
+The parser uses keyword-matching heuristics — no external NLP dependencies.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field as dc_field
 from typing import Any, Optional
 
-from .schema import Schema, FieldType
+from .schema import Schema, FieldType, ViewType
+
+
+@dataclass
+class Filter:
+    """A single filter on an entity field.
+
+    Attributes:
+        field: The field name to filter on.
+        operator: One of ``eq``, ``ne``, ``gt``, ``lt``, ``gte``, ``lte``,
+            ``in``, ``contains``, ``startswith``.
+        value: The comparison value.
+    """
+
+    field: str
+    operator: str = "eq"
+    value: Any = None
+
+    def to_dict(self) -> dict:
+        return {"field": self.field, "operator": self.operator, "value": self.value}
+
+
+@dataclass
+class Sort:
+    """A sort directive.
+
+    Attributes:
+        field: The field name to sort by.
+        direction: ``"asc"`` or ``"desc"``.
+    """
+
+    field: str
+    direction: str = "asc"
+
+    def to_dict(self) -> dict:
+        return {"field": self.field, "direction": self.direction}
 
 
 @dataclass
 class Intent:
-    """A parsed user intent — what they want to do."""
+    """A parsed user intent.
 
-    action: str = "show"
+    Attributes:
+        action: ``"list"``, ``"create"``, ``"edit"``, ``"detail"``, ``"delete"``, ``"chart"``.
+        entity: The target entity name from the schema.
+        filters: List of :class:`Filter` objects.
+        sort: Optional :class:`Sort` directive.
+        raw: The original input string.
+        view_hint: Optional :class:`ViewType` suggested by the intent.
+    """
+
+    action: str = "list"
     entity: str = ""
-    fields: list[str] = field(default_factory=list)
-    filters: list[dict] = field(default_factory=list)
-    sort_by: Optional[tuple[str, str]] = None  # (field, "asc"|"desc")
+    filters: list[Filter] = dc_field(default_factory=list)
+    sort: Optional[Sort] = None
     raw: str = ""
+    view_hint: Optional[ViewType] = None
 
-    def __repr__(self) -> str:
-        parts = [f"action={self.action}", f"entity={self.entity}"]
-        if self.fields:
-            parts.append(f"fields={self.fields}")
-        if self.filters:
-            parts.append(f"filters={self.filters}")
-        if self.sort_by:
-            parts.append(f"sort={self.sort_by}")
-        return f"Intent({', '.join(parts)})"
+    def to_dict(self) -> dict:
+        d: dict[str, Any] = {
+            "action": self.action,
+            "entity": self.entity,
+            "filters": [f.to_dict() for f in self.filters],
+        }
+        if self.sort:
+            d["sort"] = self.sort.to_dict()
+        d["raw"] = self.raw
+        if self.view_hint:
+            d["view_hint"] = self.view_hint.value
+        return d
 
 
-class IntentParser:
+# --- Keywords ---
+
+_ACTION_KEYWORDS: dict[str, str] = {
+    "show": "list",
+    "list": "list",
+    "display": "list",
+    "view": "detail",
+    "see": "detail",
+    "new": "create",
+    "add": "create",
+    "create": "create",
+    "edit": "edit",
+    "modify": "edit",
+    "update": "edit",
+    "delete": "delete",
+    "remove": "delete",
+    "chart": "chart",
+    "plot": "chart",
+    "graph": "chart",
+    "dashboard": "list",
+}
+
+_SORT_RE = re.compile(
+    r"\bsorted\s+by\s+(\w+)(?:\s+(ascending|descending|asc|desc))?",
+    re.IGNORECASE,
+)
+_SORT_RE_ALT = re.compile(
+    r"\border\s+by\s+(\w+)(?:\s+(ascending|descending|asc|desc))?",
+    re.IGNORECASE,
+)
+
+# Comparison patterns: "over 50ft", "under 100", "greater than 50", "less than 10"
+_COMP_RE = re.compile(
+    r"\b(over|under|above|below|greater\s+than|less\s+than|more\s+than|at\s+least|at\s+most)"
+    r"\s+(\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+
+# Equality patterns: "status is active", "status = active"
+_EQ_RE = re.compile(
+    r"\b(\w+)\s+(?:is|=|equals?|==)\s+(\w+)",
+    re.IGNORECASE,
+)
+
+# "with" or "where" prefix
+_WHERE_RE = re.compile(r"\b(?:where|with|having)\s+(.+)", re.IGNORECASE)
+
+
+def parse_intent(text: str, schema: Schema) -> Intent:
+    """Parse a natural-language string into an :class:`Intent`.
+
+    Args:
+        text: Natural language input.
+        schema: The data schema, used to resolve entity names and field references.
+
+    Returns:
+        A structured :class:`Intent`.
     """
-    Parse natural language into structured Intents.
+    raw = text.strip()
+    lower = raw.lower()
 
-    Uses keyword matching + schema awareness. Not trying to be ChatGPT —
-    trying to be a good whistle.
+    # Determine action
+    action = "list"
+    first_word = ""
+    words = lower.split()
+    if words:
+        first_word = words[0]
+    if first_word in _ACTION_KEYWORDS:
+        action = _ACTION_KEYWORDS[first_word]
 
-        >>> parser = IntentParser(schema)
-        >>> intent = parser.parse("show vessels with hours over 5000")
-        >>> intent.action
-        'show'
-        >>> intent.filters
-        [{'field': 'engine_hours', 'op': 'gt', 'value': 5000}]
-    """
+    # Also scan all words for action keywords (e.g. "chart" might appear later)
+    if action == "list":
+        for w in words:
+            if w in ("chart", "plot", "graph"):
+                action = "chart"
+                break
 
-    # Action keywords → canonical actions
-    ACTION_MAP = {
-        "show": "show",
-        "list": "list",
-        "find": "find",
-        "search": "search",
-        "which": "which",
-        "get": "get",
-        "view": "view",
-        "detail": "detail",
-        "inspect": "inspect",
-        "add": "add",
-        "create": "add",
-        "new": "add",
-        "edit": "edit",
-        "update": "edit",
-        "modify": "edit",
-        "delete": "delete",
-        "remove": "delete",
-        "summary": "summary",
-        "overview": "summary",
-        "stats": "summary",
-        "count": "summary",
-    }
+    # Determine entity
+    entity = ""
+    for ent in schema.entities:
+        # Match entity name or label (plural or singular)
+        candidates = {ent.name.lower(), ent.label.lower() if ent.label else ""}
+        # Add plurals
+        for c in list(candidates):
+            candidates.add(c + "s")
+        for w in words:
+            if w in candidates:
+                entity = ent.name
+                break
+        if entity:
+            break
 
-    # Operator patterns: (regex, operator)
-    OPERATOR_PATTERNS = [
-        (r"(?:greater\s+than\s+or\s+equal\s+to|at\s+least|>=|≥)\s*(\S+)", "gte"),
-        (r"(?:less\s+than\s+or\s+equal\s+to|at\s+most|<=|≤)\s*(\S+)", "lte"),
-        (r"(?:greater\s+than|over|above|more\s+than|>|>)\s*(\S+)", "gt"),
-        (r"(?:less\s+than|under|below|fewer\s+than|<)\s*(\S+)", "lt"),
-        (r"(?:equal\s+to|equals|is|=|==)\s*(\S+)", "eq"),
-        (r"(?:not\s+equal\s+to|not|!=|≠)\s*(\S+)", "ne"),
-        (r"(?:contains|includes?|like)\s+(\S+)", "contains"),
-    ]
+    if not entity and schema.entities:
+        entity = schema.entities[0].name
 
-    # Sort patterns — capture multi-word field names
-    SORT_ASC = re.compile(
-        r"(?:sort(?:ed)?(?:\s+by)?|order(?:ed)?(?:\s+by)?)\s+(.+?)"
-        r"(?:\s+(?:ascending|asc|a-z|smallest|oldest))?(?:\s*$|\s+(?:and|with|where)\b)",
-        re.IGNORECASE,
+    # Parse filters
+    filters: list[Filter] = []
+
+    # Comparison filters
+    for m in _COMP_RE.finditer(lower):
+        op_word = m.group(1).lower().replace(" ", "")
+        value = float(m.group(2))
+        operator = "gt"
+        if op_word in ("over", "above", "greaterthan", "morethan"):
+            operator = "gt"
+        elif op_word in ("under", "below", "lessthan"):
+            operator = "lt"
+        elif op_word == "atleast":
+            operator = "gte"
+        elif op_word == "atmost":
+            operator = "lte"
+
+        # Try to find the field being compared
+        field_name = _find_field_before(text, m.start(), schema, entity)
+        if field_name:
+            filters.append(Filter(field=field_name, operator=operator, value=value))
+        else:
+            # If we know the entity, try numeric fields
+            ent = schema.get_entity(entity) if entity else None
+            if ent:
+                for f in ent.fields:
+                    if f.type == FieldType.NUMBER:
+                        filters.append(Filter(field=f.name, operator=operator, value=value))
+                        break
+
+    # Equality filters
+    for m in _EQ_RE.finditer(lower):
+        field_name = m.group(1).lower()
+        value = m.group(2).strip()
+        # Validate against schema
+        ent = schema.get_entity(entity) if entity else None
+        if ent:
+            schema_field = ent.get_field(field_name)
+            if schema_field:
+                filters.append(Filter(field=schema_field.name, operator="eq", value=value))
+
+    # Parse sort
+    sort = None
+    for pattern in (_SORT_RE, _SORT_RE_ALT):
+        m = pattern.search(lower)
+        if m:
+            sort_field = m.group(1)
+            direction = "asc"
+            if m.group(2):
+                d = m.group(2).lower()
+                if d in ("desc", "descending"):
+                    direction = "desc"
+            # Validate field name
+            ent = schema.get_entity(entity) if entity else None
+            if ent and ent.get_field(sort_field):
+                sort = Sort(field=sort_field, direction=direction)
+            elif ent:
+                # Try fuzzy match
+                for f in ent.fields:
+                    if sort_field in f.name.lower():
+                        sort = Sort(field=f.name, direction=direction)
+                        break
+            break
+
+    # Determine view hint
+    view_hint = None
+    if action == "chart":
+        view_hint = ViewType.CHART
+    elif action == "create" or action == "edit":
+        view_hint = ViewType.FORM
+    elif action == "detail":
+        view_hint = ViewType.DETAIL
+    elif action == "list":
+        view_hint = ViewType.LIST
+
+    return Intent(
+        action=action,
+        entity=entity,
+        filters=filters,
+        sort=sort,
+        raw=raw,
+        view_hint=view_hint,
     )
-    SORT_DESC = re.compile(
-        r"(?:sort(?:ed)?(?:\s+by)?|order(?:ed)?(?:\s+by)?)\s+(.+?)"
-        r"\s+(?:descending|desc|z-a|largest|newest|biggest)",
-        re.IGNORECASE,
-    )
-    SORT_NEWEST = re.compile(r"(?:newest|latest|most\s+recent)\s+(.+?)$", re.IGNORECASE)
-    SORT_OLDEST = re.compile(r"(?:oldest|earliest)\s+(.+?)$", re.IGNORECASE)
 
-    def __init__(self, schema: Schema):
-        self.schema = schema
 
-    def parse(self, text: str) -> Intent:
-        """
-        Parse a natural language string into an Intent.
-
-        Args:
-            text: Natural language, e.g. "show vessels with hours over 5000"
-
-        Returns:
-            A structured Intent
-        """
-        text_lower = text.lower().strip()
-        intent = Intent(raw=text)
-
-        # Parse action
-        intent.action = self._parse_action(text_lower)
-
-        # Parse entity
-        intent.entity = self._parse_entity(text_lower)
-
-        # Parse filters
-        intent.filters = self._parse_filters(text_lower, text)
-
-        # Parse sort
-        intent.sort_by = self._parse_sort(text_lower)
-
-        # Parse requested fields
-        intent.fields = self._parse_fields(text_lower)
-
-        return intent
-
-    def _parse_action(self, text: str) -> str:
-        """Extract the action verb."""
-        words = text.split()
-        for word in words:
-            clean = re.sub(r"[^a-z]", "", word)
-            if clean in self.ACTION_MAP:
-                return self.ACTION_MAP[clean]
-        return "show"
-
-    def _parse_entity(self, text: str) -> str:
-        """Extract the entity name using schema awareness."""
-        # Try to find an entity name in the text
-        for entity in self.schema.entities:
-            entity_lower = entity.lower()
-            singular = self.schema._singular(entity).lower()
-            plural = self.schema._plural(entity).lower()
-
-            if entity_lower in text or plural in text or singular in text:
-                return entity
-
-        # Fallback: try word-by-word
-        words = re.findall(r"\b\w+\b", text)
-        for entity in self.schema.entities:
-            entity_lower = entity.lower()
-            for word in words:
-                if word.lower() == entity_lower:
-                    return entity
-
-        return self.schema.entities[0] if self.schema.entities else ""
-
-    def _parse_filters(self, text_lower: str, original: str) -> list[dict]:
-        """Extract filter conditions from the text."""
-        filters = []
-
-        intent_entity = self._parse_entity(text_lower)
-        if not intent_entity:
-            return filters
-
-        try:
-            field_map = self._build_field_lookup(intent_entity)
-        except KeyError:
-            return filters
-
-        # Try each operator pattern
-        for pattern, op in self.OPERATOR_PATTERNS:
-            for match in re.finditer(pattern, text_lower):
-                value_str = match.group(1)
-                # Try to find which field this filter refers to
-                # Look backwards from the match for a field name
-                start = match.start()
-                preceding = text_lower[:start]
-                field_name = self._find_field_in_text(preceding, field_map)
-
-                if field_name:
-                    parsed_value = self._coerce_value(field_name, intent_entity, value_str)
-                    filters.append({
-                        "field": field_name,
-                        "op": op,
-                        "value": parsed_value,
-                    })
-
-        # Also check for "is <status>" patterns (enum matching)
-        try:
-            fields = self.schema.get_fields(intent_entity)
-            for fname, spec in fields.items():
-                if spec.type == FieldType.ENUM:
-                    for option in spec.options:
-                        if re.search(rf"\b{re.escape(option.lower())}\b", text_lower):
-                            # Check we haven't already captured this
-                            already = any(
-                                f["field"] == fname and f["value"] == option
-                                for f in filters
-                            )
-                            if not already:
-                                filters.append({
-                                    "field": fname,
-                                    "op": "eq",
-                                    "value": option,
-                                })
-        except KeyError:
-            pass
-
-        # Deduplicate
-        seen = set()
-        unique = []
-        for f in filters:
-            key = (f["field"], f["op"], str(f["value"]))
-            if key not in seen:
-                seen.add(key)
-                unique.append(f)
-
-        return unique
-
-    def _parse_sort(self, text: str) -> Optional[tuple[str, str]]:
-        """Extract sort specification."""
-        # Try explicit descending
-        m = self.SORT_DESC.search(text)
-        if m:
-            field_word = m.group(1)
-            resolved = self._try_resolve_field(field_word)
-            if resolved:
-                return (resolved, "desc")
-
-        # Try explicit ascending
-        m = self.SORT_ASC.search(text)
-        if m:
-            field_word = m.group(1)
-            resolved = self._try_resolve_field(field_word)
-            if resolved:
-                return (resolved, "asc")
-
-        # Try "newest/latest <field>"
-        m = self.SORT_NEWEST.search(text)
-        if m:
-            field_word = m.group(1)
-            resolved = self._try_resolve_field(field_word)
-            if resolved:
-                return (resolved, "desc")
-
-        # Try "oldest <field>"
-        m = self.SORT_OLDEST.search(text)
-        if m:
-            field_word = m.group(1)
-            resolved = self._try_resolve_field(field_word)
-            if resolved:
-                return (resolved, "asc")
-
+def _find_field_before(
+    text: str, pos: int, schema: Schema, entity: str
+) -> Optional[str]:
+    """Try to find a field name mentioned before a comparison operator."""
+    before = text[:pos].lower().split()
+    if not before:
         return None
-
-    def _parse_fields(self, text: str) -> list[str]:
-        """Extract explicitly requested fields."""
-        # Look for "show only X and Y" or "display X, Y"
-        patterns = [
-            r"(?:show|display|list|select)\s+(?:only\s+)?([\w\s,]+?)(?:\s+(?:from|in|where|with|sorted|ordered|of)\b)",
-            r"(?:fields?|columns?)\s*[:=]\s*([\w\s,]+)",
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                raw_fields = match.group(1)
-                field_names = re.split(r"[,\s]+", raw_fields.strip())
-                resolved = []
-                for fn in field_names:
-                    fn = fn.strip()
-                    if fn:
-                        resolved_name = self._try_resolve_field(fn)
-                        if resolved_name and resolved_name not in resolved:
-                            resolved.append(resolved_name)
-                if resolved:
-                    return resolved
-        return []
-
-    def _build_field_lookup(self, entity: str) -> dict[str, str]:
-        """Build a lowercase field name → canonical name map."""
-        result = {}
-        fields = self.schema.get_fields(entity)
-        for fname, spec in fields.items():
-            result[fname.lower()] = fname
-            result[spec.label.lower()] = fname
-            # Also map without underscores
-            result[fname.replace("_", "").lower()] = fname
-        return result
-
-    def _find_field_in_text(self, text: str, field_map: dict[str, str]) -> Optional[str]:
-        """Find the last field name mentioned in the given text."""
-        # Check multi-word labels first (longer = more specific)
-        sorted_keys = sorted(field_map.keys(), key=len, reverse=True)
-        for key in sorted_keys:
-            if key in text:
-                return field_map[key]
+    ent = schema.get_entity(entity) if entity else None
+    if not ent:
         return None
-
-    def _try_resolve_field(self, word: str) -> Optional[str]:
-        """Try to resolve a word to a field name across all entities."""
-        word_lower = word.lower().strip()
-        # Normalize: try with underscores, spaces, or no separator
-        word_underscore = word_lower.replace(" ", "_")
-        word_nospace = word_lower.replace(" ", "").replace("_", "")
-        for entity in self.schema.entities:
-            try:
-                fields = self.schema.get_fields(entity)
-                for fname, spec in fields.items():
-                    fn_lower = fname.lower()
-                    fn_nospace = fname.replace("_", "").lower()
-                    if fn_lower == word_underscore or fn_lower == word_lower:
-                        return fname
-                    if spec.label.lower() == word_lower:
-                        return fname
-                    if fn_nospace == word_nospace:
-                        return fname
-            except KeyError:
-                continue
-        return None
-
-    def _coerce_value(self, field_name: str, entity: str, value_str: str) -> Any:
-        """Coerce a string value to the appropriate type based on schema."""
-        try:
-            spec = self.schema.get_field(entity, field_name)
-            if spec.type in (FieldType.NUMBER,):
-                # Strip non-numeric prefix/suffix
-                cleaned = re.sub(r"[^\d.-]", "", value_str)
-                if "." in cleaned:
-                    return float(cleaned)
-                return int(cleaned) if cleaned else 0
-            elif spec.type == FieldType.BOOLEAN:
-                return value_str.lower() in ("true", "yes", "1", "active")
-            else:
-                # Strip quotes if present
-                cleaned = value_str.strip("\"'.,")
-                return cleaned
-        except (KeyError, ValueError):
-            return value_str.strip("\"'.,")
+    # Check last 3 words before the operator
+    for w in reversed(before[-3:]):
+        for f in ent.fields:
+            if w == f.name.lower() or w == (f.label or "").lower():
+                return f.name
+            if w in f.name.lower() and len(w) >= 3:
+                return f.name
+    return None
