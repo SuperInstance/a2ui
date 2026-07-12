@@ -1,298 +1,333 @@
-"""
-Renderers — turn an InterfaceSpec into actual output.
+"""Renderers for A2UI InterfaceSpecs.
 
-HTML, Markdown, JSON. The interface is the same; the output adapts.
+Three output formats are supported:
+
+- :class:`HTMLRenderer` — LCARS-inspired HTML with inline CSS
+- :class:`MarkdownRenderer` — Clean Markdown for terminals and docs
+- :class:`JSONRenderer` — Structured JSON for programmatic consumption
 """
 
 from __future__ import annotations
 
-import html
 import json
 from typing import Any
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .core import InterfaceSpec
+from .interface import InterfaceSpec, InterfaceComponent
+from .schema import ViewType
 
 
 class BaseRenderer:
     """Base class for renderers."""
 
-    def render(self, spec: InterfaceSpec) -> str:
-        """Render the spec to a string."""
+    def render(self, spec: InterfaceSpec) -> str:  # pragma: no cover
         raise NotImplementedError
 
 
 class HTMLRenderer(BaseRenderer):
-    """
-    Generates clean HTML — no frameworks, no build step.
+    """Render an :class:`InterfaceSpec` to LCARS-inspired HTML.
 
-    The output is self-contained and can be dropped into any page.
+    The output is a complete, self-contained HTML document with inline CSS.
+    The aesthetic is dark-background, bold colors, rounded elements —
+    inspired by the Star Trek LCARS computer interface.
     """
 
     def render(self, spec: InterfaceSpec) -> str:
-        if spec.view_type == "table":
-            return self._render_table(spec)
-        elif spec.view_type == "detail":
-            return self._render_detail(spec)
-        elif spec.view_type == "form":
+        body = self._render_body(spec)
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{self._esc(spec.title)}</title>
+<style>
+{self._css()}
+</style>
+</head>
+<body>
+<div class="lcars-container">
+  <header class="lcars-header">
+    <div class="lcars-bar"></div>
+    <h1>{self._esc(spec.title)}</h1>
+    <div class="lcars-bar right"></div>
+  </header>
+  <main class="lcars-main">
+{body}
+  </main>
+  <footer class="lcars-footer">
+    <div class="lcars-bar"></div>
+    <span class="lcars-stardate">A2UI · {self._esc(spec.view_type.value)}</span>
+  </footer>
+</div>
+</body>
+</html>"""
+
+    def _render_body(self, spec: InterfaceSpec) -> str:
+        if spec.view_type == ViewType.LIST:
+            return self._render_list(spec)
+        elif spec.view_type == ViewType.FORM:
             return self._render_form(spec)
-        elif spec.view_type == "summary":
-            return self._render_summary(spec)
-        return self._render_table(spec)
+        elif spec.view_type == ViewType.DETAIL:
+            return self._render_detail(spec)
+        elif spec.view_type == ViewType.CHART:
+            return self._render_chart(spec)
+        elif spec.view_type == ViewType.DASHBOARD:
+            return self._render_dashboard(spec)
+        return ""
 
-    def _render_table(self, spec: InterfaceSpec) -> str:
-        rows = spec.data
-        cols = spec.columns
+    def _render_list(self, spec: InterfaceSpec) -> str:
+        columns = [c for c in spec.components if c.component_type == "column"]
+        actions = next((c for c in spec.components if c.component_type == "actions"), None)
 
-        parts = [
-            '<div class="a2ui-container">',
-            f'<h2 class="a2ui-title">{html.escape(spec.title)}</h2>',
-        ]
+        header_cells = "".join(
+            f'<th class="lcars-th">{self._esc(c.label)}</th>' for c in columns
+        )
+        if actions:
+            header_cells += f'<th class="lcars-th">{self._esc(actions.label)}</th>'
 
-        if not rows:
-            parts.append('<p class="a2ui-empty">No matching records.</p>')
-            parts.append("</div>")
-            return "\n".join(parts)
+        # Sample empty row
+        row_cells = "".join(
+            f'<td class="lcars-td" data-field="{self._esc(c.field or "")}">—</td>'
+            for c in columns
+        )
+        if actions:
+            action_buttons = ""
+            if actions.actions:
+                for a in actions.actions:
+                    action_buttons += (
+                        f'<button class="lcars-btn-sm" data-action="{self._esc(a.get("action", ""))}">'
+                        f'{self._esc(a["label"])}</button>'
+                    )
+            row_cells += f'<td class="lcars-td">{action_buttons}</td>'
 
-        parts.append('<table class="a2ui-table">')
-        parts.append("<thead><tr>")
-        for col in cols:
-            label = self._col_label(spec, col)
-            arrow = ""
-            if spec.sort_by and spec.sort_by[0] == col:
-                arrow = " ↓" if spec.sort_by[1] == "desc" else " ↑"
-            parts.append(f"<th>{html.escape(label)}{arrow}</th>")
-        parts.append("</tr></thead>")
-        parts.append("<tbody>")
-        for row in rows:
-            parts.append("<tr>")
-            for col in cols:
-                val = row.get(col, "")
-                formatted = self._format_value(val)
-                parts.append(f"<td>{formatted}</td>")
-            parts.append("</tr>")
-        parts.append("</tbody>")
-        parts.append("</table>")
-        parts.append(f'<p class="a2ui-count">{len(rows)} record(s)</p>')
-        parts.append("</div>")
-        return "\n".join(parts)
-
-    def _render_detail(self, spec: InterfaceSpec) -> str:
-        rows = spec.data
-        cols = spec.columns
-
-        parts = [
-            '<div class="a2ui-container">',
-            f'<h2 class="a2ui-title">{html.escape(spec.title)}</h2>',
-        ]
-
-        if not rows:
-            parts.append('<p class="a2ui-empty">No matching records.</p>')
-            parts.append("</div>")
-            return "\n".join(parts)
-
-        for row in rows:
-            parts.append('<div class="a2ui-detail">')
-            for col in cols:
-                label = self._col_label(spec, col)
-                val = row.get(col, "")
-                formatted = self._format_value(val)
-                parts.append(
-                    f'<div class="a2ui-field">'
-                    f'<span class="a2ui-label">{html.escape(label)}:</span> '
-                    f'<span class="a2ui-value">{formatted}</span>'
-                    f"</div>"
+        filter_html = ""
+        if spec.filters:
+            filter_parts = []
+            for f in spec.filters:
+                if hasattr(f, "to_dict"):
+                    fd = f.to_dict()
+                else:
+                    fd = f
+                filter_parts.append(
+                    f'<span class="lcars-filter">{self._esc(fd.get("field", ""))} '
+                    f'{self._esc(fd.get("operator", ""))} {self._esc(str(fd.get("value", "")))}</span>'
                 )
-            parts.append("</div>")
+            filter_html = f'<div class="lcars-filters">{" · ".join(filter_parts)}</div>'
 
-        parts.append("</div>")
-        return "\n".join(parts)
-
-    def _render_form(self, spec: InterfaceSpec) -> str:
-        cols = spec.columns
-
-        parts = [
-            '<div class="a2ui-container">',
-            f'<h2 class="a2ui-title">{html.escape(spec.title)}</h2>',
-            '<form class="a2ui-form">',
-        ]
-
-        for col in cols:
-            label = self._col_label(spec, col)
-            parts.append(
-                f'<div class="a2ui-form-field">'
-                f'<label for="a2ui-{html.escape(col)}">{html.escape(label)}</label>'
-                f'<input type="text" id="a2ui-{html.escape(col)}" name="{html.escape(col)}" />'
-                f"</div>"
+        sort_html = ""
+        if spec.sort:
+            sd = spec.sort.to_dict() if hasattr(spec.sort, "to_dict") else spec.sort
+            sort_html = (
+                f'<div class="lcars-sort">Sorted by {self._esc(sd.get("field", ""))} '
+                f'{self._esc(sd.get("direction", ""))}</div>'
             )
 
-        parts.append('<button type="submit">Submit</button>')
-        parts.append("</form>")
-        parts.append("</div>")
-        return "\n".join(parts)
+        return f"""{filter_html}{sort_html}
+<table class="lcars-table">
+  <thead><tr>{header_cells}</tr></thead>
+  <tbody>
+    <tr>{row_cells}</tr>
+  </tbody>
+</table>"""
 
-    def _render_summary(self, spec: InterfaceSpec) -> str:
-        rows = spec.data
-        cols = spec.columns
-
-        parts = [
-            '<div class="a2ui-container">',
-            f'<h2 class="a2ui-title">{html.escape(spec.title)}</h2>',
-        ]
-
-        if not rows:
-            parts.append('<p class="a2ui-empty">No data to summarize.</p>')
-            parts.append("</div>")
-            return "\n".join(parts)
-
-        parts.append('<div class="a2ui-summary">')
-        parts.append(f"<p><strong>Total records:</strong> {len(rows)}</p>")
-
-        # Numeric field stats
-        for col in cols:
-            values = [r.get(col) for r in rows if r.get(col) is not None]
-            if values and all(isinstance(v, (int, float)) for v in values):
-                parts.append(
-                    f"<p><strong>{html.escape(self._col_label(spec, col))}:</strong> "
-                    f"min={min(values)}, max={max(values)}, "
-                    f"avg={sum(values) / len(values):.1f}</p>"
+    def _render_form(self, spec: InterfaceSpec) -> str:
+        rows = []
+        for c in spec.components:
+            if c.component_type == "input":
+                rows.append(self._render_input(c))
+            elif c.component_type == "button":
+                rows.append(
+                    f'<button class="lcars-btn lcars-btn-{self._esc(c.variant or "primary")}">'
+                    f'{self._esc(c.label)}</button>'
                 )
+        return "\n".join(f'<div class="lcars-form-row">{r}</div>' for r in rows)
 
-        parts.append("</div>")
-        parts.append("</div>")
-        return "\n".join(parts)
+    def _render_input(self, c: InterfaceComponent) -> str:
+        label = self._esc(c.label)
+        field_name = self._esc(c.field or c.label)
+        if c.input_type == "select" and c.options:
+            opts = "".join(
+                f'<option value="{self._esc(o)}">{self._esc(o)}</option>' for o in c.options
+            )
+            return f'<label class="lcars-label">{label}</label><select class="lcars-input" name="{field_name}">{opts}</select>'
+        elif c.input_type == "reference" and c.reference:
+            return (
+                f'<label class="lcars-label">{label}</label>'
+                f'<input class="lcars-input" type="text" name="{field_name}" '
+                f'data-reference="{self._esc(c.reference)}" placeholder="Search {self._esc(c.reference)}...">'
+            )
+        else:
+            itype = self._esc(c.input_type or "text")
+            default = f' value="{self._esc(str(c.default))}"' if c.default is not None else ""
+            return (
+                f'<label class="lcars-label">{label}</label>'
+                f'<input class="lcars-input" type="{itype}" name="{field_name}"{default}>'
+            )
 
-    def _col_label(self, spec: InterfaceSpec, col: str) -> str:
-        """Get a human-readable label for a column."""
-        try:
-            fields = spec.intent._parser_schema_fields if hasattr(spec.intent, "_parser_schema_fields") else {}
-            if col in fields:
-                return fields[col].display_label
-        except Exception:
-            pass
-        return col.replace("_", " ").title()
+    def _render_detail(self, spec: InterfaceSpec) -> str:
+        rows = []
+        for c in spec.components:
+            if c.component_type == "field":
+                rows.append(
+                    f'<div class="lcars-detail-row">'
+                    f'<span class="lcars-detail-label">{self._esc(c.label)}</span>'
+                    f'<span class="lcars-detail-value" data-field="{self._esc(c.field or "")}">—</span>'
+                    f'</div>'
+                )
+            elif c.component_type == "button":
+                rows.append(
+                    f'<button class="lcars-btn lcars-btn-{self._esc(c.variant or "primary")}" '
+                    f'data-action="{self._esc(c.action or "")}">{self._esc(c.label)}</button>'
+                )
+        return "\n".join(rows)
 
-    def _format_value(self, val: Any) -> str:
-        """Format a value for HTML display."""
-        if val is None:
-            return '<span class="a2ui-null">—</span>'
-        if isinstance(val, bool):
-            return "✓" if val else "✗"
-        return html.escape(str(val))
+    def _render_chart(self, spec: InterfaceSpec) -> str:
+        return '<div class="lcars-chart-placeholder">Chart view — bind to data source</div>'
+
+    def _render_dashboard(self, spec: InterfaceSpec) -> str:
+        cards = []
+        for c in spec.components:
+            cards.append(
+                f'<div class="lcars-card"><h3>{self._esc(c.label)}</h3>'
+                f'<div data-field="{self._esc(c.field or "")}">—</div></div>'
+            )
+        return f'<div class="lcars-dashboard">{" ".join(cards)}</div>'
+
+    @staticmethod
+    def _esc(text: str) -> str:
+        if text is None:
+            return ""
+        return (
+            str(text)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&#39;")
+        )
+
+    @staticmethod
+    def _css() -> str:
+        return """
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; color: #ffcc00; font-family: 'Helvetica Neue', sans-serif; }
+.lcars-container { max-width: 960px; margin: 0 auto; padding: 20px; }
+.lcars-header { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
+.lcars-bar { flex: 1; height: 48px; background: #cc66cc; border-radius: 24px; }
+.lcars-bar.right { background: #ff9933; }
+.lcars-header h1 { color: #ffcc00; font-size: 1.4rem; white-space: nowrap; }
+.lcars-main { background: #110022; border-radius: 16px; padding: 24px; min-height: 300px; }
+.lcars-table { width: 100%; border-collapse: separate; border-spacing: 0; }
+.lcars-th { background: #5544aa; color: #fff; padding: 10px 14px; text-align: left; border-radius: 8px 8px 0 0; }
+.lcars-td { padding: 10px 14px; border-bottom: 1px solid #332255; color: #ffcc00; }
+.lcars-btn { background: #ff9933; color: #000; border: none; border-radius: 20px; padding: 10px 28px; font-size: 1rem; cursor: pointer; margin: 4px; }
+.lcars-btn-primary { background: #ff9933; }
+.lcars-btn-secondary { background: #5544aa; color: #fff; }
+.lcars-btn-danger { background: #cc3333; color: #fff; }
+.lcars-btn-sm { background: #5544aa; color: #fff; border: none; border-radius: 12px; padding: 4px 12px; font-size: 0.75rem; cursor: pointer; margin: 2px; }
+.lcars-form-row { margin-bottom: 16px; }
+.lcars-label { display: block; color: #ff9933; margin-bottom: 4px; font-size: 0.85rem; }
+.lcars-input { width: 100%; background: #220044; border: 1px solid #5544aa; border-radius: 8px; padding: 10px; color: #ffcc00; font-size: 1rem; }
+.lcars-input:focus { outline: 2px solid #ff9933; }
+.lcars-detail-row { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #332255; }
+.lcars-detail-label { color: #ff9933; }
+.lcars-detail-value { color: #ffcc00; }
+.lcars-filters { margin-bottom: 12px; color: #cc66cc; font-size: 0.85rem; }
+.lcars-sort { margin-bottom: 12px; color: #5599ff; font-size: 0.85rem; }
+.lcars-card { background: #220044; border-radius: 12px; padding: 16px; }
+.lcars-dashboard { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; }
+.lcars-footer { display: flex; align-items: center; gap: 16px; margin-top: 24px; }
+.lcars-stardate { color: #5599ff; font-size: 0.75rem; white-space: nowrap; }
+.lcars-chart-placeholder { text-align: center; padding: 60px 0; color: #5599ff; }
+"""
 
 
 class MarkdownRenderer(BaseRenderer):
-    """Renders to clean Markdown — great for terminal output and docs."""
+    """Render an :class:`InterfaceSpec` to Markdown."""
 
     def render(self, spec: InterfaceSpec) -> str:
-        if spec.view_type == "table":
-            return self._render_table(spec)
-        elif spec.view_type == "detail":
-            return self._render_detail(spec)
-        elif spec.view_type == "form":
-            return self._render_form(spec)
-        elif spec.view_type == "summary":
-            return self._render_summary(spec)
-        return self._render_table(spec)
+        lines = [f"# {spec.title}", ""]
 
-    def _render_table(self, spec: InterfaceSpec) -> str:
-        rows = spec.data
-        cols = spec.columns
+        if spec.filters:
+            lines.append("**Filters:**")
+            for f in spec.filters:
+                fd = f.to_dict() if hasattr(f, "to_dict") else f
+                lines.append(f"- `{fd.get('field', '')}` {fd.get('operator', '')} `{fd.get('value', '')}`")
+            lines.append("")
 
-        lines = [f"## {spec.title}", ""]
+        if spec.sort:
+            sd = spec.sort.to_dict() if hasattr(spec.sort, "to_dict") else spec.sort
+            lines.append(f"**Sort:** {sd.get('field', '')} ({sd.get('direction', '')})")
+            lines.append("")
 
-        if not rows:
-            lines.append("No matching records.")
-            return "\n".join(lines)
+        if spec.view_type == ViewType.LIST:
+            lines.append(self._render_list(spec))
+        elif spec.view_type == ViewType.FORM:
+            lines.append(self._render_form(spec))
+        elif spec.view_type == ViewType.DETAIL:
+            lines.append(self._render_detail(spec))
+        elif spec.view_type == ViewType.CHART:
+            lines.append("*Chart view — bind to data source*\n")
+        elif spec.view_type == ViewType.DASHBOARD:
+            lines.append(self._render_dashboard(spec))
 
-        # Header
-        headers = [self._col_label(spec, c) for c in cols]
-        lines.append("| " + " | ".join(headers) + " |")
-        lines.append("| " + " | ".join("---" for _ in cols) + " |")
+        return "\n".join(lines)
 
-        # Rows
-        for row in rows:
-            values = [self._format_value(row.get(c, "")) for c in cols]
-            lines.append("| " + " | ".join(values) + " |")
+    def _render_list(self, spec: InterfaceSpec) -> str:
+        columns = [c for c in spec.components if c.component_type == "column"]
+        actions = next((c for c in spec.components if c.component_type == "actions"), None)
 
-        lines.append("")
-        lines.append(f"*{len(rows)} record(s)*")
+        if not columns:
+            return "*No columns defined*"
+
+        header = "| " + " | ".join(c.label for c in columns)
+        if actions:
+            header += f" | {actions.label}"
+        header += " |"
+
+        separator = "| " + " | ".join("---" for _ in columns)
+        if actions:
+            separator += " | ---"
+        separator += " |"
+
+        # One empty row
+        row = "| " + " | ".join("—" for _ in columns)
+        if actions and actions.actions:
+            row += " | " + " ".join(a["label"] for a in actions.actions)
+        row += " |"
+
+        return "\n".join([header, separator, row])
+
+    def _render_form(self, spec: InterfaceSpec) -> str:
+        lines = ["| Field | Type | Required |", "| --- | --- | --- |"]
+        for c in spec.components:
+            if c.component_type == "input":
+                itype = c.input_type or "text"
+                if c.options:
+                    itype = f"select ({', '.join(c.options)})"
+                lines.append(f"| {c.label} | {itype} | {'Yes' if c.field else ''} |")
+            elif c.component_type == "button":
+                lines.append(f"\n**[{c.label}]**")
         return "\n".join(lines)
 
     def _render_detail(self, spec: InterfaceSpec) -> str:
-        rows = spec.data
-        cols = spec.columns
-
-        lines = [f"## {spec.title}", ""]
-
-        for i, row in enumerate(rows):
-            if i > 0:
-                lines.append("---")
-                lines.append("")
-            for col in cols:
-                label = self._col_label(spec, col)
-                val = self._format_value(row.get(col, ""))
-                lines.append(f"**{label}:** {val}")
-
-        if not rows:
-            lines.append("No matching records.")
+        lines = []
+        for c in spec.components:
+            if c.component_type == "field":
+                lines.append(f"**{c.label}:** —")
+        for c in spec.components:
+            if c.component_type == "button":
+                lines.append(f"\n**[{c.label}]**")
         return "\n".join(lines)
 
-    def _render_form(self, spec: InterfaceSpec) -> str:
-        cols = spec.columns
-        lines = [f"## {spec.title}", ""]
-        for col in cols:
-            label = self._col_label(spec, col)
-            lines.append(f"**{label}:** `[_______________]`")
-        lines.append("")
-        lines.append("`[ Submit ]`")
+    def _render_dashboard(self, spec: InterfaceSpec) -> str:
+        lines = []
+        for c in spec.components:
+            lines.append(f"### {c.label}\n—")
         return "\n".join(lines)
-
-    def _render_summary(self, spec: InterfaceSpec) -> str:
-        rows = spec.data
-        cols = spec.columns
-
-        lines = [f"## {spec.title}", ""]
-        lines.append(f"**Total records:** {len(rows)}")
-        lines.append("")
-
-        for col in cols:
-            values = [r.get(col) for r in rows if r.get(col) is not None]
-            if values and all(isinstance(v, (int, float)) for v in values):
-                label = self._col_label(spec, col)
-                lines.append(
-                    f"**{label}:** min={min(values)}, "
-                    f"max={max(values)}, avg={sum(values) / len(values):.1f}"
-                )
-
-        if not rows:
-            lines.append("No data to summarize.")
-        return "\n".join(lines)
-
-    def _col_label(self, spec: InterfaceSpec, col: str) -> str:
-        return col.replace("_", " ").title()
-
-    def _format_value(self, val: Any) -> str:
-        if val is None:
-            return "—"
-        if isinstance(val, bool):
-            return "✓" if val else "✗"
-        return str(val)
 
 
 class JSONRenderer(BaseRenderer):
-    """Renders to JSON for API/programmatic consumption."""
+    """Render an :class:`InterfaceSpec` to JSON."""
 
-    def render(self, spec: InterfaceSpec) -> str:
-        output = {
-            "title": spec.title,
-            "view_type": spec.view_type,
-            "columns": spec.columns,
-            "filters": spec.filters,
-            "sort_by": list(spec.sort_by) if spec.sort_by else None,
-            "count": len(spec.data),
-            "data": spec.data,
-        }
-        return json.dumps(output, indent=2, default=str)
+    def render(self, spec: InterfaceSpec, indent: int = 2) -> str:
+        return json.dumps(spec.to_dict(), indent=indent)
