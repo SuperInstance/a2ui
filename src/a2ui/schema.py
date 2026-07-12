@@ -126,8 +126,15 @@ class Schema:
     entities: list[Entity] = dc_field(default_factory=list)
 
     def get_entity(self, name: str) -> Optional[Entity]:
+        lower = name.lower()
         for ent in self.entities:
-            if ent.name == name or (ent.label and ent.label.lower() == name.lower()):
+            if ent.name == name or ent.name.lower() == lower:
+                return ent
+            if ent.label and ent.label.lower() == lower:
+                return ent
+            # Try singular (user may pass plural)
+            singular = lower.rstrip("s") if lower.endswith("s") else lower + "s"
+            if ent.name.lower() == singular or (ent.label and ent.label.lower() == singular):
                 return ent
         return None
 
