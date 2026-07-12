@@ -21,6 +21,11 @@ classifiers = [
     "Topic :: Software Development :: User Interfaces",
 ]
 
+[project.urls]
+Homepage = "https://github.com/SuperInstance/a2ui"
+Repository = "https://github.com/SuperInstance/a2ui"
+Issues = "https://github.com/SuperInstance/a2ui/issues"
+
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-cov"]
 
