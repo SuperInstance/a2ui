@@ -158,9 +158,11 @@ class HTMLRenderer(BaseRenderer):
         else:
             itype = self._esc(c.input_type or "text")
             default = f' value="{self._esc(str(c.default))}"' if c.default is not None else ""
+            req = " required" if getattr(c, 'required', False) else ""
+            field_id = f' id="field-{field_name}"'
             return (
-                f'<label class="lcars-label">{label}</label>'
-                f'<input class="lcars-input" type="{itype}" name="{field_name}"{default}>'
+                f'<label class="lcars-label" for="field-{field_name}">{label}</label>'
+                f'<input class="lcars-input" type="{itype}" name="{field_name}"{field_id}{default}{req}>'
             )
 
     def _render_detail(self, spec: InterfaceSpec) -> str:
