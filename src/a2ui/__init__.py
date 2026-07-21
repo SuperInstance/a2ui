@@ -119,6 +119,7 @@ class AdaptiveInterface:
                 label=field.label or field.name,
                 field=field.name,
                 input_type=self._input_type_for(field),
+                required=field.required,
             )
             if field.type == FieldType.ENUM:
                 comp.options = field.options

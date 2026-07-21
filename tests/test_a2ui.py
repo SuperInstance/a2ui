@@ -279,6 +279,54 @@ class TestAdaptiveInterface:
                 assert c.input_type == "reference"
                 assert c.reference == "vessel"
 
+    def test_required_propagates_to_form_input(self, vessel_schema):
+        """Regression: Field.required must propagate to InterfaceComponent.required.
+
+        Previously the form builder dropped the required flag, so HTML output
+        omitted the ``required`` attribute and the Markdown form renderer showed
+        "Yes" for every field.
+        """
+        ai = AdaptiveInterface(vessel_schema)
+        spec = ai.render("new vessel")
+        inputs_by_field = {
+            c.field: c for c in spec.components if c.component_type == "input"
+        }
+        # ``name`` is declared required=True on vessel
+        assert inputs_by_field["name"].required is True
+        # Fields without ``required`` default to False
+        assert inputs_by_field["length"].required is False
+        assert inputs_by_field["home_port"].required is False
+
+    def test_required_renders_html_attribute(self, vessel_schema):
+        """Regression: required inputs must emit the ``required`` HTML attribute."""
+        ai = AdaptiveInterface(vessel_schema)
+        html = ai.to_html("new vessel")
+        # The required name input should include required
+        name_input = 'name="name"'
+        assert name_input in html
+        # Find the input tag for name and verify required attribute
+        import re
+        m = re.search(r'<input[^>]*name="name"[^>]*>', html)
+        assert m is not None
+        assert "required" in m.group(0)
+        # The non-required length input should NOT have required
+        m = re.search(r'<input[^>]*name="length"[^>]*>', html)
+        assert m is not None
+        assert "required" not in m.group(0)
+
+    def test_required_renders_markdown_column(self, vessel_schema):
+        """Regression: Markdown form Required column must reflect field.required."""
+        ai = AdaptiveInterface(vessel_schema)
+        md = ai.to_markdown("new vessel")
+        lines = md.splitlines()
+        # Find the table row for the required name field
+        name_row = next(ln for ln in lines if "| Vessel Name |" in ln)
+        assert "Yes" in name_row
+        # Find a non-required field row
+        length_row = next(ln for ln in lines if "| Length |" in ln)
+        # The Required column should NOT say Yes for length
+        assert not length_row.endswith("| Yes |")
+
 
 # --- Renderer Tests ---
 

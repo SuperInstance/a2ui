@@ -158,7 +158,7 @@ class HTMLRenderer(BaseRenderer):
         else:
             itype = self._esc(c.input_type or "text")
             default = f' value="{self._esc(str(c.default))}"' if c.default is not None else ""
-            req = " required" if getattr(c, 'required', False) else ""
+            req = " required" if c.required else ""
             field_id = f' id="field-{field_name}"'
             return (
                 f'<label class="lcars-label" for="field-{field_name}">{label}</label>'
@@ -306,7 +306,7 @@ class MarkdownRenderer(BaseRenderer):
                 itype = c.input_type or "text"
                 if c.options:
                     itype = f"select ({', '.join(c.options)})"
-                lines.append(f"| {c.label} | {itype} | {'Yes' if c.field else ''} |")
+                lines.append(f"| {c.label} | {itype} | {'Yes' if c.required else ''} |")
             elif c.component_type == "button":
                 lines.append(f"\n**[{c.label}]**")
         return "\n".join(lines)

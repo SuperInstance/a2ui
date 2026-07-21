@@ -2,7 +2,18 @@
 
 > You don't design the interface. You describe your data, whistle your intent, and the interface generates itself.
 
-A2UI is the adaptive interface layer of Working Animal Architecture. Instead of hand-building CRUD forms, list views, and detail pages, you define a `Schema` of your entities and let the `AdaptiveInterface` generate the right view based on natural-language intent. The output renders to HTML (LCARS-inspired), Markdown, or JSON.
+A2UI is the **Whistle Layer** of [Working Animal Architecture](https://github.com/SuperInstance): the way a human operator communicates *what they want to see* to the system without hand-building each view. You define a `Schema` of your entities and let `AdaptiveInterface` generate the right view based on a natural-language intent. Output renders to HTML (LCARS-inspired), Markdown, or JSON.
+
+## Documentation
+
+| Doc | What it's for |
+|-----|---------------|
+| **[README](README.md)** (you are here) | Overview, quickstart, intent grammar, summary API |
+| **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | Layer model, the whistle metaphor, extension points |
+| **[docs/API.md](docs/API.md)** | Full API reference for every public symbol |
+| **[docs/EXAMPLES.md](docs/EXAMPLES.md)** | Three runnable examples + building-your-own template |
+| **[docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)** | Dev setup, conventions, adding field types / view types / renderers |
+| **[CHANGELOG.md](CHANGELOG.md)** | Release notes |
 
 ## Why It Exists
 
@@ -232,16 +243,15 @@ pytest --cov=a2ui --cov-report=term-missing
 
 ## Ecosystem
 
-| Repo | Role |
-|------|------|
-| **`SuperInstance/a2ui`** | **Adaptive interface generation — this repo** |
-| `SuperInstance/whistle` | Intent DSL — could use A2UI for admin surfaces |
-| `SuperInstance/trawl` | Commercial fishing — A2UI can generate vessel/catch UIs |
-| `SuperInstance/shepherds-console` | Operations dashboard (complementary visualization) |
-| `SuperInstance/baton` | Generational handoff |
-| `SuperInstance/PLATO` | Conversation rooms |
-| `SuperInstance/conservation` | Fences |
-| `SuperInstance/flux` | Model routing |
+A2UI is part of the broader **Working Animal Architecture** stack:
+
+| Layer | Role |
+|-------|------|
+| **`a2ui`** (this repo) | **Adaptive interface generation** — natural-language intent → rendered UI |
+| Whistle | Intent DSL — composable with A2UI for custom parsers |
+| Trawl | Marine / fishing application — A2UI generates vessel/catch admin surfaces |
+| Shepherds-console | Operations dashboard (complementary visualization) |
+| Conservation | Fences — runtime constraints on what intents are accepted |
 
 ## Philosophy
 

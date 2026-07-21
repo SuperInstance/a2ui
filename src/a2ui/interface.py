@@ -28,6 +28,7 @@ class InterfaceComponent:
         options: For select inputs.
         reference: For reference inputs, the target entity.
         default: Default value.
+        required: Whether the value is required (form inputs only).
         action: Action string for buttons / nav items.
         variant: Button variant (``"primary"``, ``"secondary"``, ``"danger"``).
         actions: For action components, a list of action dicts.
@@ -41,6 +42,7 @@ class InterfaceComponent:
     options: Optional[list[str]] = None
     reference: Optional[str] = None
     default: Any = None
+    required: bool = False
     action: Optional[str] = None
     variant: Optional[str] = None
     actions: Optional[list[dict]] = None
@@ -63,6 +65,8 @@ class InterfaceComponent:
             d["reference"] = self.reference
         if self.default is not None:
             d["default"] = self.default
+        if self.required:
+            d["required"] = True
         if self.action:
             d["action"] = self.action
         if self.variant:
